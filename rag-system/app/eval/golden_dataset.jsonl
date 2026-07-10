@@ -1,0 +1,5 @@
+{"name": "termination_clause_basic", "question": "What notice period is required to terminate the vendor agreement?", "expected_answer": "The agreement requires 30 days written notice for termination without cause.", "document_ids": []}
+{"name": "payment_terms", "question": "What are the payment terms specified in the contract?", "expected_answer": "Payment is due within 30 days of invoice receipt, net 30.", "document_ids": []}
+{"name": "liability_cap", "question": "Is there a cap on liability in the agreement?", "expected_answer": "Liability is capped at the total fees paid in the preceding 12 months.", "document_ids": []}
+{"name": "unanswerable_question", "question": "What is the CEO's personal cell phone number?", "expected_answer": "This information is not available in the provided documents.", "document_ids": []}
+{"name": "multilingual_query_fr", "question": "Quelle est la durée du préavis de résiliation ?", "expected_answer": "Le préavis de résiliation est de 30 jours.", "document_ids": []}
