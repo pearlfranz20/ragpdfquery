@@ -1,4 +1,5 @@
 import logging
+import os
 import shutil
 import tempfile
 import uuid
@@ -51,21 +52,43 @@ def _run_ingestion_job(job_id: uuid.UUID, tmp_path: str, filename: str, strategy
 
 @router.post("/upload", response_model=IngestionJobOut)
 def upload_pdf(file: UploadFile, background_tasks: BackgroundTasks, strategy: str | None = None, db: Session = Depends(get_db)):
-    if not file.filename.lower().endswith(".pdf"):
+    filename = file.filename or ""
+    if not filename.lower().endswith(".pdf"):
         raise HTTPException(400, "Only PDF files are supported")
 
     tmp_dir = tempfile.mkdtemp()
-    tmp_path = f"{tmp_dir}/{file.filename}"
-    with open(tmp_path, "wb") as f:
-        shutil.copyfileobj(file.file, f)
+    tmp_path = ""
+    total_size = 0
+    try:
+        with tempfile.NamedTemporaryFile(mode="wb", suffix=".pdf", dir=tmp_dir, delete=False) as tmp_file:
+            tmp_path = tmp_file.name
+            while chunk := file.file.read(1024 * 1024):
+                total_size += len(chunk)
+                if total_size > settings.max_upload_size_bytes:
+                    raise HTTPException(
+                        413,
+                        f"PDF exceeds the {settings.max_upload_size_bytes}-byte upload limit",
+                    )
+                tmp_file.write(chunk)
 
-    batch_id = uuid.uuid4()
-    job = IngestionJob(batch_id=batch_id, filename=file.filename, status="queued")
-    db.add(job)
-    db.commit()
-    db.refresh(job)
+        with open(tmp_path, "rb") as tmp_file:
+            if tmp_file.read(5) != b"%PDF-":
+                raise HTTPException(400, "Uploaded file does not have a valid PDF signature")
+    except Exception:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise
 
-    background_tasks.add_task(_run_ingestion_job, job.id, tmp_path, file.filename, strategy)
+    try:
+        batch_id = uuid.uuid4()
+        job = IngestionJob(batch_id=batch_id, filename=os.path.basename(filename), status="queued")
+        db.add(job)
+        db.commit()
+        db.refresh(job)
+    except Exception:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise
+
+    background_tasks.add_task(_run_ingestion_job, job.id, tmp_path, os.path.basename(filename), strategy)
     return job
 
 

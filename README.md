@@ -258,3 +258,7 @@ calling out before a real production deploy:
   corpus size — defaults in `db/init.sql` are reasonable for ~100k-1M chunks.
 - Add PII scanning/redaction in the ingestion pipeline if your PDFs contain
   sensitive personal data.
+
+PDF uploads are streamed to temporary storage with a 50 MiB default limit and
+must begin with a PDF signature. Set `MAX_UPLOAD_SIZE_BYTES` in `.env` to
+change the limit.

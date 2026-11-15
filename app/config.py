@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     chunk_size_tokens: int = 500
     chunk_overlap_tokens: int = 75
     ingest_max_workers: int = 8
+    max_upload_size_bytes: int = 50 * 1024 * 1024
 
     # Retrieval
     retrieval_top_k: int = 8
