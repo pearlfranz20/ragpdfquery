@@ -41,7 +41,7 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
         out: list[list[float]] = []
         for i in range(0, len(texts), 256):
             batch = texts[i : i + 256]
-            resp = self.client.embeddings.create(model=self.model, input=batch)
+            resp = self.client.embeddings.create(model=self.model, input=batch, dimensions=self.dimension)
             out.extend([d.embedding for d in resp.data])
         return out
 

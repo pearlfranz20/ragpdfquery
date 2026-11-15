@@ -1,4 +1,5 @@
 from functools import lru_cache
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -16,7 +17,9 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     openai_chat_model: str = "gpt-4o"
     openai_embedding_model: str = "text-embedding-3-large"
-    openai_embedding_dim: int = 3072
+    # text-embedding-3-* models accept a `dimensions` parameter; 1536 keeps the
+    # vectors under pgvector's 2000-dim index limit (see db/init.sql).
+    openai_embedding_dim: int = 1536
 
     # Bedrock
     aws_region: str = "us-east-1"

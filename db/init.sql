@@ -19,9 +19,12 @@ CREATE TABLE IF NOT EXISTS documents (
 CREATE INDEX IF NOT EXISTS idx_documents_status ON documents(status);
 CREATE INDEX IF NOT EXISTS idx_documents_content_hash ON documents(content_hash);
 
--- Embedding dimension: set to match your embedding provider (see .env.example).
--- Default here is 1536 (OpenAI text-embedding-3-small); change before first
--- ingest if you use a different model, since pgvector requires a fixed dim.
+-- Embedding dimension: must match OPENAI_EMBEDDING_DIM / BEDROCK_EMBEDDING_DIM
+-- for the provider you use (see .env.example). Default here is 1536, matching
+-- the default OpenAI text-embedding-3-large truncated to 1536 dims; use 1024
+-- for Bedrock Titan v2. Change before first ingest, since pgvector requires a
+-- fixed dimension. Note the ivfflat/hnsw indexes below cap out at 2000 dims,
+-- so the full 3072-dim OpenAI output cannot be indexed without halfvec.
 CREATE TABLE IF NOT EXISTS chunks (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     document_id     UUID NOT NULL REFERENCES documents(id) ON DELETE CASCADE,

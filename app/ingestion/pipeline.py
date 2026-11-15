@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import uuid
 
 from app.config import get_settings
@@ -24,15 +25,25 @@ def _hash_file(path: str) -> str:
     return h.hexdigest()
 
 
-def ingest_pdf(pdf_path: str, filename: str | None = None, strategy: str | None = None) -> uuid.UUID:
+def ingest_pdf(
+    pdf_path: str,
+    filename: str | None = None,
+    strategy: str | None = None,
+    *,
+    persist_source: bool = True,
+) -> uuid.UUID:
     """
     End-to-end ingestion of a single PDF: extract -> chunk -> embed -> store.
     Idempotent: re-ingesting a file with the same content hash is a no-op if
     it already completed successfully.
 
+    `persist_source=False` stores no source_path on the document. Use it when
+    `pdf_path` is a temporary file that will not exist after ingestion (API
+    uploads), so a later reindex does not point at a missing file.
+
     Returns the document_id.
     """
-    filename = filename or pdf_path.split("/")[-1]
+    filename = filename or os.path.basename(pdf_path)
     strategy = strategy or settings.chunking_strategy
     content_hash = _hash_file(pdf_path)
 
@@ -47,7 +58,12 @@ def ingest_pdf(pdf_path: str, filename: str | None = None, strategy: str | None 
             document.status = "processing"
             document.error_message = None
         else:
-            document = Document(filename=filename, content_hash=content_hash, source_path=pdf_path, status="processing")
+            document = Document(
+                filename=filename,
+                content_hash=content_hash,
+                source_path=pdf_path if persist_source else None,
+                status="processing",
+            )
             db.add(document)
         db.flush()
         document_id = document.id
@@ -80,7 +96,7 @@ def ingest_pdf(pdf_path: str, filename: str | None = None, strategy: str | None 
             # Clear any previous chunks for this document (re-ingest case)
             db.query(Chunk).filter_by(document_id=document_id).delete()
 
-            for raw, vector in zip(raw_chunks, vectors):
+            for raw, vector in zip(raw_chunks, vectors, strict=True):
                 chunk_lang = detect_language(raw.text, default=doc_language)
                 db.add(
                     Chunk(
@@ -96,7 +112,7 @@ def ingest_pdf(pdf_path: str, filename: str | None = None, strategy: str | None 
                     )
                 )
 
-            document = db.query(Document).get(document_id)
+            document = db.get(Document, document_id)
             document.num_pages = len(pages)
             document.primary_language = doc_language
             document.status = "completed"
@@ -108,7 +124,7 @@ def ingest_pdf(pdf_path: str, filename: str | None = None, strategy: str | None 
     except Exception as e:  # noqa: BLE001
         logger.exception("Failed to ingest %s", filename)
         with session_scope() as db:
-            document = db.query(Document).get(document_id)
+            document = db.get(Document, document_id)
             document.status = "failed"
             document.error_message = str(e)[:2000]
         raise

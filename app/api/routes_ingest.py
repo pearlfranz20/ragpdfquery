@@ -3,7 +3,7 @@ import os
 import shutil
 import tempfile
 import uuid
-from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile
 from sqlalchemy.orm import Session
@@ -18,69 +18,89 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 router = APIRouter()
 
-_executor = ThreadPoolExecutor(max_workers=settings.ingest_max_workers)
+PDF_SIGNATURE = b"%PDF-"
+UPLOAD_READ_CHUNK_BYTES = 1024 * 1024
 
 
-def _run_ingestion_job(job_id: uuid.UUID, tmp_path: str, filename: str, strategy: str | None):
+def _utcnow() -> datetime:
+    return datetime.now(UTC)
+
+
+def _update_job(job_id: uuid.UUID, **fields) -> None:
     with session_scope() as db:
-        job = db.query(IngestionJob).get(job_id)
-        job.status = "running"
-        from datetime import datetime, timezone
+        job = db.get(IngestionJob, job_id)
+        if job is None:
+            logger.warning("Ingestion job %s disappeared before status update", job_id)
+            return
+        for name, value in fields.items():
+            setattr(job, name, value)
 
-        job.started_at = datetime.now(timezone.utc)
 
+def _run_ingestion_job(
+    job_id: uuid.UUID,
+    pdf_path: str,
+    filename: str,
+    strategy: str | None,
+    *,
+    persist_source: bool = True,
+    cleanup_dir: str | None = None,
+) -> None:
+    """
+    Background worker for a single ingestion job.
+
+    `cleanup_dir` is a temp directory owned by this job (created by the upload
+    endpoint) that is removed when the job finishes. Reindex jobs operate on
+    the document's original source path and pass no cleanup dir, so that path
+    is never touched.
+    """
+    _update_job(job_id, status="running", started_at=_utcnow())
     try:
-        document_id = ingest_pdf(tmp_path, filename=filename, strategy=strategy)
-        with session_scope() as db:
-            job = db.query(IngestionJob).get(job_id)
-            job.status = "succeeded"
-            job.document_id = document_id
-            from datetime import datetime, timezone
-
-            job.finished_at = datetime.now(timezone.utc)
+        document_id = ingest_pdf(pdf_path, filename=filename, strategy=strategy, persist_source=persist_source)
+        _update_job(job_id, status="succeeded", document_id=document_id, finished_at=_utcnow())
     except Exception as e:  # noqa: BLE001
-        with session_scope() as db:
-            job = db.query(IngestionJob).get(job_id)
-            job.status = "failed"
-            job.error_message = str(e)[:2000]
-            from datetime import datetime, timezone
-
-            job.finished_at = datetime.now(timezone.utc)
+        logger.exception("Ingestion job %s failed for %s", job_id, filename)
+        _update_job(job_id, status="failed", error_message=str(e)[:2000], finished_at=_utcnow())
     finally:
-        shutil.rmtree(tmp_path, ignore_errors=True)
+        if cleanup_dir:
+            shutil.rmtree(cleanup_dir, ignore_errors=True)
 
 
-@router.post("/upload", response_model=IngestionJobOut)
-def upload_pdf(file: UploadFile, background_tasks: BackgroundTasks, strategy: str | None = None, db: Session = Depends(get_db)):
-    filename = file.filename or ""
-    if not filename.lower().endswith(".pdf"):
-        raise HTTPException(400, "Only PDF files are supported")
-
-    tmp_dir = tempfile.mkdtemp()
-    tmp_path = ""
-    total_size = 0
+def _save_upload_to_temp(file: UploadFile) -> tuple[str, str]:
+    """
+    Stream an upload into a fresh temp directory, enforcing the size limit and
+    checking the PDF signature. Returns (tmp_dir, tmp_path). On any failure the
+    temp directory is removed before the exception propagates.
+    """
+    tmp_dir = tempfile.mkdtemp(prefix="pdf-upload-")
     try:
+        total_size = 0
         with tempfile.NamedTemporaryFile(mode="wb", suffix=".pdf", dir=tmp_dir, delete=False) as tmp_file:
             tmp_path = tmp_file.name
-            while chunk := file.file.read(1024 * 1024):
+            while chunk := file.file.read(UPLOAD_READ_CHUNK_BYTES):
                 total_size += len(chunk)
                 if total_size > settings.max_upload_size_bytes:
-                    raise HTTPException(
-                        413,
-                        f"PDF exceeds the {settings.max_upload_size_bytes}-byte upload limit",
-                    )
+                    raise HTTPException(413, f"PDF exceeds the {settings.max_upload_size_bytes}-byte upload limit")
                 tmp_file.write(chunk)
 
         with open(tmp_path, "rb") as tmp_file:
-            if tmp_file.read(5) != b"%PDF-":
+            if tmp_file.read(len(PDF_SIGNATURE)) != PDF_SIGNATURE:
                 raise HTTPException(400, "Uploaded file does not have a valid PDF signature")
     except Exception:
         shutil.rmtree(tmp_dir, ignore_errors=True)
         raise
+    return tmp_dir, tmp_path
+
+
+@router.post("/upload", response_model=IngestionJobOut)
+def upload_pdf(file: UploadFile, background_tasks: BackgroundTasks, strategy: str | None = None, db: Session = Depends(get_db)):
+    filename = os.path.basename(file.filename or "")
+    if not filename.lower().endswith(".pdf"):
+        raise HTTPException(400, "Only PDF files are supported")
+
+    tmp_dir, tmp_path = _save_upload_to_temp(file)
 
     try:
-        batch_id = uuid.uuid4()
-        job = IngestionJob(batch_id=batch_id, filename=os.path.basename(filename), status="queued")
+        job = IngestionJob(batch_id=uuid.uuid4(), filename=filename, status="queued")
         db.add(job)
         db.commit()
         db.refresh(job)
@@ -88,7 +108,11 @@ def upload_pdf(file: UploadFile, background_tasks: BackgroundTasks, strategy: st
         shutil.rmtree(tmp_dir, ignore_errors=True)
         raise
 
-    background_tasks.add_task(_run_ingestion_job, job.id, tmp_path, os.path.basename(filename), strategy)
+    # Uploaded files live only in the temp dir, which is deleted after the job,
+    # so no source_path is persisted; reindexing requires a re-upload.
+    background_tasks.add_task(
+        _run_ingestion_job, job.id, tmp_path, filename, strategy, persist_source=False, cleanup_dir=tmp_dir
+    )
     return job
 
 
@@ -110,7 +134,7 @@ def list_documents(status: str | None = None, limit: int = 100, offset: int = 0,
 
 @router.delete("/documents/{document_id}")
 def delete_document(document_id: uuid.UUID, db: Session = Depends(get_db)):
-    doc = db.query(Document).get(document_id)
+    doc = db.get(Document, document_id)
     if not doc:
         raise HTTPException(404, "Document not found")
     db.delete(doc)  # cascades to chunks
@@ -120,14 +144,13 @@ def delete_document(document_id: uuid.UUID, db: Session = Depends(get_db)):
 
 @router.post("/documents/{document_id}/reindex", response_model=IngestionJobOut)
 def reindex_document(document_id: uuid.UUID, background_tasks: BackgroundTasks, strategy: str | None = None, db: Session = Depends(get_db)):
-    doc = db.query(Document).get(document_id)
+    doc = db.get(Document, document_id)
     if not doc:
         raise HTTPException(404, "Document not found")
-    if not doc.source_path:
-        raise HTTPException(400, "Original source path unavailable for reindex; re-upload instead")
+    if not doc.source_path or not os.path.isfile(doc.source_path):
+        raise HTTPException(400, "Original source file unavailable for reindex; re-upload instead")
 
-    batch_id = uuid.uuid4()
-    job = IngestionJob(batch_id=batch_id, filename=doc.filename, status="queued", document_id=doc.id)
+    job = IngestionJob(batch_id=uuid.uuid4(), filename=doc.filename, status="queued", document_id=doc.id)
     db.add(job)
     db.commit()
     db.refresh(job)
