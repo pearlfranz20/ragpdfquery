@@ -1,0 +1,19 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 140
+extend-exclude = ["alembic/versions"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+ignore = [
+    "E501",  # long lines are tolerated; formatter not enforced
+    "B008",  # FastAPI Depends() in argument defaults is idiomatic
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app"]

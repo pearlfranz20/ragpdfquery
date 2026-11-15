@@ -60,7 +60,7 @@ def extract_pdf(pdf_path: str) -> list[PageContent]:
     return pages
 
 
-def _rasterize_page(page: "fitz.Page", zoom: float = 2.0) -> Image.Image:
+def _rasterize_page(page: fitz.Page, zoom: float = 2.0) -> Image.Image:
     mat = fitz.Matrix(zoom, zoom)
     pix = page.get_pixmap(matrix=mat)
     return Image.open(io.BytesIO(pix.tobytes("png")))
