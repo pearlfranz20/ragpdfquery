@@ -98,8 +98,9 @@ cp .env.example .env        # fill in your provider credentials
 docker compose up -d db     # starts Postgres 16 + pgvector
 pip install -r requirements.txt
 
-# create schema
-psql "$DATABASE_URL" -f db/init.sql
+# create schema (either works; alembic also records the schema version)
+alembic upgrade head
+#   or: psql "$DATABASE_URL" -f db/init.sql && alembic stamp head
 
 # bulk ingest a folder of PDFs (thousands is fine — it's resumable/idempotent
 # per-file via a content hash, and safe to re-run)
@@ -118,6 +119,33 @@ streamlit run dashboard/streamlit_app.py
 # offline eval
 python scripts/run_eval.py
 ```
+
+The embedding dimension is fixed at schema-creation time: `vector(1536)` in
+`db/init.sql` must equal `OPENAI_EMBEDDING_DIM` or `BEDROCK_EMBEDDING_DIM`
+for the provider you use. The OpenAI provider passes that value as the
+`dimensions` parameter, so `text-embedding-3-large` is truncated to 1536 by
+default; pgvector's ivfflat/hnsw indexes do not support more than 2000
+dimensions, so the model's full 3072-dim output cannot be indexed as-is.
+
+### Schema changes
+
+`db/init.sql` is the baseline schema and `alembic/versions/0001_baseline.py`
+applies it verbatim. For any later change, edit `app/models.py`, then:
+
+```bash
+alembic revision --autogenerate -m "describe the change"
+alembic upgrade head
+```
+
+### Development
+
+```bash
+pip install -r requirements-dev.txt
+pytest            # unit tests (no database required)
+ruff check .      # lint; `ruff check . --fix` applies safe fixes
+```
+
+CI (`.github/workflows/ci.yml`) runs both on every push and pull request.
 
 ## Chunking strategies
 
@@ -261,4 +289,8 @@ calling out before a real production deploy:
 
 PDF uploads are streamed to temporary storage with a 50 MiB default limit and
 must begin with a PDF signature. Set `MAX_UPLOAD_SIZE_BYTES` in `.env` to
-change the limit.
+change the limit. The temp file is deleted once the ingestion job finishes,
+so uploaded documents have no stored `source_path` and cannot be reindexed
+via `POST /ingest/documents/{id}/reindex`; re-upload the file instead.
+Documents ingested from disk with `scripts/ingest_folder.py` keep their
+source path and can be reindexed as long as the file still exists.
